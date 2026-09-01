@@ -9,111 +9,156 @@ public class SwiftShareWhatsappPlugin: NSObject, FlutterPlugin {
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        if call.method == "installed" {
-            if let whatsappURL = URL(string: "whatsapp://send?text=installed") {
-                result(UIApplication.shared.canOpenURL(whatsappURL) ? 1 : 0)
+        switch call.method {
+        case "installed":
+            self.isInstalled(call.arguments, result: result)
+        case "share":
+            self.share(call.arguments, result: result)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    private func isInstalled(_ arguments: Any?, result: @escaping FlutterResult) {
+        let packageName = (arguments as? String) ?? "com.whatsapp"
+        let scheme = packageName.contains("w4b") ? "whatsapp-biz://" : "whatsapp://"
+
+        if let url = URL(string: scheme) {
+            result(UIApplication.shared.canOpenURL(url) ? 1 : 0)
+        } else {
+            result(0)
+        }
+    }
+
+    private func share(_ arguments: Any?, result: @escaping FlutterResult) {
+        guard let dict = arguments as? [String: Any?] else {
+            result(FlutterError(code: "INVALID_ARGUMENTS", message: "Arguments must be a Map", details: nil))
+            return
+        }
+
+        let rawPhone = dict["phone"] as? String
+        let text = dict["text"] as? String
+        let filePath = dict["file"] as? String
+        let packageName = (dict["packageName"] as? String) ?? "com.whatsapp"
+
+        // Bersihkan nomor telepon (hanya digit)
+        let phone = rawPhone?.replacingOccurrences(of: "[^0-9]", with: "", options: .regularExpression)
+
+        // 1. Direct Chat ke Nomor Telepon via URL Scheme (Tanpa File)
+        if let phone = phone, !phone.isEmpty, filePath == nil || filePath?.isEmpty == true {
+            let encodedText = (text ?? "").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            let scheme = packageName.contains("w4b") ? "whatsapp-biz" : "whatsapp"
+            let urlString = "\(scheme)://send?phone=\(phone)&text=\(encodedText)"
+
+            if let url = URL(string: urlString), UIApplication.shared.canOpenURL(url) {
+                UIApplication.shared.open(url, options: [:]) { success in
+                    result(success ? 1 : 0)
+                }
                 return
             }
-            result(FlutterError(code: "ERROR_INSTALLED", message: "Failed to generate whatsappURL", details: nil))
-            return
         }
-      
-        if call.method == "share" {
-            self.share(call.arguments, result: result)
-            return
-        }
-        
-        result(FlutterMethodNotImplemented)
-    }
-}
 
-extension SwiftShareWhatsappPlugin {
-    fileprivate func share(_ arguments: Any?, result: @escaping FlutterResult) {
-        if let dict = arguments as? [String: String?] {
-            var activityItems = [Any]()
-            if let text = dict["text"] as? String {
+        // 2. Share Teks & File via UIActivityViewController
+        var activityItems = [Any]()
+        let hasFile = !(filePath?.isEmpty ?? true)
+
+        if let text = text, !text.isEmpty {
+            if hasFile {
+                // Hanya gunakan ItemSource jika menyertakan file agar tidak bentrok di Share Extension WhatsApp
                 activityItems.append(OptionalTextActivityItemSource(text: text))
+            } else {
+                activityItems.append(text)
             }
-            if let filePath = dict["file"] as? String {
-                let file = URL(fileURLWithPath: filePath)
-                activityItems.append(file)
-            }
-            let activityViewController = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
-            
-            if UIDevice.current.userInterfaceIdiom == .pad {
-                activityViewController.popoverPresentationController?.sourceView = UIApplication.topViewController()?.view
-                if let view = UIApplication.topViewController()?.view {
-                    activityViewController.popoverPresentationController?.permittedArrowDirections = []
-                    activityViewController.popoverPresentationController?.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 0, height: 0)
-                }
-            }
-            
-            activityViewController.excludedActivityTypes = [
-                UIActivity.ActivityType.postToFacebook,
-                UIActivity.ActivityType.postToTwitter,
-                UIActivity.ActivityType.postToWeibo,
-                UIActivity.ActivityType.message,
-                UIActivity.ActivityType.print,
-                UIActivity.ActivityType.copyToPasteboard,
-                UIActivity.ActivityType.assignToContact,
-                UIActivity.ActivityType.saveToCameraRoll,
-                UIActivity.ActivityType.addToReadingList,
-                UIActivity.ActivityType.postToFlickr,
-                UIActivity.ActivityType.postToVimeo,
-                UIActivity.ActivityType.postToTencentWeibo,
-                UIActivity.ActivityType.airDrop,
-                UIActivity.ActivityType.mail,
-            ]
-            
-            DispatchQueue.main.async {
-                self.presentActivityView(activityViewController: activityViewController)
-            }
-            
-            result(1)
+        }
+
+        if let filePath = filePath, !filePath.isEmpty {
+            let fileUrl = URL(fileURLWithPath: filePath)
+            activityItems.append(fileUrl)
+        }
+
+        if activityItems.isEmpty {
+            result(FlutterError(code: "INVALID_ARGUMENTS", message: "Either file, text, or phone must be provided", details: nil))
             return
         }
-        
-        result(FlutterError(code: "ERROR_SHARE", message: "Arguments is not a dictionary [String:String]", details: arguments.debugDescription))
+
+        let activityViewController = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+
+        // iPad Support
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            if let topVC = UIApplication.topViewController() {
+                activityViewController.popoverPresentationController?.sourceView = topVC.view
+                activityViewController.popoverPresentationController?.permittedArrowDirections = []
+                activityViewController.popoverPresentationController?.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
+            }
+        }
+
+        activityViewController.excludedActivityTypes = [
+            .postToFacebook, .postToTwitter, .postToWeibo, .message,
+            .print, .copyToPasteboard, .assignToContact, .saveToCameraRoll,
+            .addToReadingList, .postToFlickr, .postToVimeo, .postToTencentWeibo,
+            .airDrop, .mail
+        ]
+
+        DispatchQueue.main.async {
+            self.presentActivityView(activityViewController: activityViewController)
+            result(1)
+        }
     }
-    
-    fileprivate func presentActivityView(activityViewController: UIActivityViewController) {
-        // using this fake view controller to prevent this iOS 13+ dismissing the top view when sharing with "Save Image" option
+
+    private func presentActivityView(activityViewController: UIActivityViewController) {
         let fakeViewController = TransparentViewController()
         fakeViewController.modalPresentationStyle = .overFullScreen
 
         activityViewController.completionWithItemsHandler = { [weak fakeViewController] _, _, _, _ in
-            if let presentingViewController = fakeViewController?.presentingViewController {
-                presentingViewController.dismiss(animated: false, completion: nil)
+            if let presenting = fakeViewController?.presentingViewController {
+                presenting.dismiss(animated: false, completion: nil)
             } else {
                 fakeViewController?.dismiss(animated: false, completion: nil)
             }
         }
 
-        UIApplication.topViewController()?.present(fakeViewController, animated: true) { [weak fakeViewController] in
-            fakeViewController?.present(activityViewController, animated: true, completion: nil)
+        if let topVC = UIApplication.topViewController() {
+            topVC.present(fakeViewController, animated: true) { [weak fakeViewController] in
+                fakeViewController?.present(activityViewController, animated: true, completion: nil)
+            }
         }
     }
 }
 
+// Helper untuk mencari Top ViewController yang kompatibel iOS 13+
 extension UIApplication {
-    class func topViewController(controller: UIViewController? = UIApplication.shared.keyWindow?.rootViewController) -> UIViewController? {
-        if let navigationController = controller as? UINavigationController {
+    class func topViewController(controller: UIViewController? = nil) -> UIViewController? {
+        var root = controller
+
+        if root == nil {
+            if #available(iOS 13.0, *) {
+                root = UIApplication.shared.connectedScenes
+                    .compactMap { $0 as? UIWindowScene }
+                    .flatMap { $0.windows }
+                    .first { $0.isKeyWindow }?.rootViewController
+            } else {
+                root = UIApplication.shared.keyWindow?.rootViewController
+            }
+        }
+
+        if let navigationController = root as? UINavigationController {
             return topViewController(controller: navigationController.visibleViewController)
         }
-        if let tabController = controller as? UITabBarController {
+        if let tabController = root as? UITabBarController {
             if let selected = tabController.selectedViewController {
                 return topViewController(controller: selected)
             }
         }
-        if let presented = controller?.presentedViewController {
+        if let presented = root?.presentedViewController {
             return topViewController(controller: presented)
         }
-        return controller
+        return root
     }
 }
 
 class TransparentViewController: UIViewController {
     override func viewDidLoad() {
+        super.viewDidLoad()
         view.backgroundColor = UIColor.clear
         view.isOpaque = false
     }
@@ -121,18 +166,19 @@ class TransparentViewController: UIViewController {
 
 class OptionalTextActivityItemSource: NSObject, UIActivityItemSource {
     let text: String
-    
+
     init(text: String) {
         self.text = text
+        super.init()
     }
-    
+
     func activityViewControllerPlaceholderItem(_ activityViewController: UIActivityViewController) -> Any {
         return text
     }
-    
+
     func activityViewController(_ activityViewController: UIActivityViewController, itemForActivityType activityType: UIActivity.ActivityType?) -> Any? {
+        // WhatsApp iOS tidak mendukung pengiriman teks caption bersamaan dengan file melalui Share Sheet
         if activityType?.rawValue == "net.whatsapp.WhatsApp.ShareExtension" {
-            // WhatsApp doesn't support both image and text, so return nil and thus only sharing an image.
             return nil
         }
         return text
