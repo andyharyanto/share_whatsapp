@@ -14,6 +14,8 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import java.io.File
 import java.io.IOException
+import android.content.ClipData
+import android.webkit.MimeTypeMap
 
 /** ShareWhatsappPlugin */
 class ShareWhatsappPlugin : FlutterPlugin, MethodCallHandler {
@@ -112,19 +114,18 @@ class ShareWhatsappPlugin : FlutterPlugin, MethodCallHandler {
             result.error("INVALID_CONTEXT", "No application context found", null)
             return
         }
-
+    
         try {
             clearShareCacheFolder()
-
+    
             val packageName = call.argument<String>("packageName") ?: "com.whatsapp"
             val rawPhone = call.argument<String?>("phone")
             val text = call.argument<String?>("text")
-            val contentType = call.argument<String?>("contentType")
+            val rawContentType = call.argument<String?>("contentType")
             val filePath = call.argument<String?>("file")
-
-            // Bersihkan nomor telepon (hanya sisipkan angka saja)
+    
             val phone = rawPhone?.replace(Regex("[^0-9]"), "")
-
+    
             // 1. Kirim File (Gambar, Video, PDF, dll.)
             if (!filePath.isNullOrEmpty()) {
                 val fileToShare = File(filePath)
@@ -132,37 +133,43 @@ class ShareWhatsappPlugin : FlutterPlugin, MethodCallHandler {
                     result.error("FILE_NOT_FOUND", "File does not exist: $filePath", null)
                     return
                 }
-
+    
                 val cachedFile = copyToShareCacheFolder(fileToShare)
                 val fileUri: Uri = FileProvider.getUriForFile(ctx, providerAuthority, cachedFile)
-
+    
+                // Deteksi MIME Type otomatis jika contentType null / */*
+                val extension = MimeTypeMap.getFileExtensionFromUrl(cachedFile.path)
+                val detectedType = if (extension != null) MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.lowercase()) else null
+                val finalContentType = rawContentType ?: detectedType ?: "image/*"
+    
                 val intent = Intent(Intent.ACTION_SEND).apply {
                     setPackage(packageName)
-                    type = contentType ?: "*/*"
+                    type = finalContentType
                     putExtra(Intent.EXTRA_STREAM, fileUri)
-
+                    
+                    // PERBAIKAN CRUCIAL: clipData Wajib dimasukkan agar WhatsApp dapat izin membaca Uri
+                    clipData = ClipData.newRawUri("Shared File", fileUri)
+    
                     if (!text.isNullOrEmpty()) {
                         putExtra(Intent.EXTRA_TEXT, text)
                     }
-
+    
                     if (!phone.isNullOrEmpty()) {
                         putExtra("jid", "$phone@s.whatsapp.net")
                     }
-
-                    // PERBAIKAN UTAMA: Flag permission wajib ditaruh langsung di Intent utama
+    
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-
-                // Berikan izin URI secara langsung ke package WhatsApp target
+    
                 ctx.grantUriPermission(packageName, fileUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-
+    
                 ctx.startActivity(intent)
                 result.success(1)
                 return
             }
-
-            // 2. Kirim Teks Langsung ke Nomor Tertentu (Deep Linking resmi WhatsApp)
+    
+            // 2. Kirim Teks Langsung ke Nomor Specific
             if (!phone.isNullOrEmpty()) {
                 val encodedText = Uri.encode(text ?: "")
                 val uri = Uri.parse("https://api.whatsapp.com/send?phone=$phone&text=$encodedText")
@@ -174,8 +181,8 @@ class ShareWhatsappPlugin : FlutterPlugin, MethodCallHandler {
                 result.success(1)
                 return
             }
-
-            // 3. Kirim Teks Biasa (Pilih Kontak Manual di WhatsApp)
+    
+            // 3. Kirim Teks Biasa
             if (!text.isNullOrEmpty()) {
                 val intent = Intent(Intent.ACTION_SEND).apply {
                     setPackage(packageName)
@@ -187,9 +194,9 @@ class ShareWhatsappPlugin : FlutterPlugin, MethodCallHandler {
                 result.success(1)
                 return
             }
-
+    
             result.error("INVALID_ARGUMENTS", "Either file, text, or phone must be provided", null)
-
+    
         } catch (e: Exception) {
             Log.e(TAG, "Error while sharing to WhatsApp", e)
             result.error("ERROR_SHARE", e.message, null)
