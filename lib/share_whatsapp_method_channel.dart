@@ -57,8 +57,8 @@ class MethodChannelShareWhatsapp extends ShareWhatsappUrl {
     if (Platform.isAndroid || Platform.isIOS) {
       String? contentType;
       if (file != null) {
-        final bytes = await file.readAsBytes();
-        contentType = lookupMimeType(file.path, headerBytes: bytes.toList());
+        // PERBAIKAN: Deteksi MIME Type langsung via path tanpa memuat bytes ke memori
+        contentType = lookupMimeType(file.path);
       }
 
       final shared = await methodChannel.invokeMethod<int>('share', {
