@@ -57,14 +57,16 @@ class ShareWhatsappPlugin : FlutterPlugin, MethodCallHandler {
             result.error("INVALID_CONTEXT", "No application context found", null)
             return
         }
-
+    
         val packageName = call.arguments as? String
-        if (packageName.isNull_or_empty()) {
+        // Perbaikan typo: ganti isNull_or_empty() menjadi isNullOrEmpty()
+        if (packageName.isNullOrEmpty()) {
             result.error("INVALID_ARGUMENT", "Package name cannot be null or empty", null)
             return
         }
-
+    
         try {
+            // Setelah guard clause di atas, Kotlin otomatis mengenali packageName sebagai String (non-null)
             val isInstalled = isPackageInstalled(packageName, ctx.packageManager)
             result.success(if (isInstalled) 1 else 0)
         } catch (e: Exception) {
