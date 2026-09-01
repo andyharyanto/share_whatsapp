@@ -3,6 +3,7 @@ package id.my.alan.share_whatsapp
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.util.Log
 import androidx.annotation.NonNull
 import androidx.core.content.FileProvider
@@ -13,103 +14,61 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import java.io.File
 import java.io.IOException
-import java.lang.ref.WeakReference
 
 /** ShareWhatsappPlugin */
 class ShareWhatsappPlugin : FlutterPlugin, MethodCallHandler {
-    @Suppress("PrivatePropertyName")
     private val TAG = "SHARE_WHATSAPP"
 
-    /// The MethodChannel that will the communication between Flutter and native Android
-    ///
-    /// This local reference serves to register the plugin with the Flutter Engine and unregister it
-    /// when the Flutter Engine is detached from the Activity
     private lateinit var channel: MethodChannel
-    private lateinit var weakReference: WeakReference<Context>
+    private var context: Context? = null
 
-    private val providerAuthority: String by lazy {
-        "${getContext().packageName}.provider"
-    }
+    private val providerAuthority: String
+        get() = "${context?.packageName}.provider"
 
-    private val shareCacheFolder: File
-        get() = File(getContext().cacheDir, "share_whatsapp")
-
-    private fun getContext(): Context {
-        return weakReference.get()!!
-    }
-
-    private fun fileIsInShareCache(file: File): Boolean {
-        return try {
-            val filePath = file.canonicalPath
-            filePath.startsWith(shareCacheFolder.canonicalPath)
-        } catch (e: IOException) {
-            false
+    private val shareCacheFolder: File?
+        get() {
+            val ctx = context ?: return null
+            return File(ctx.cacheDir, "share_whatsapp")
         }
-    }
-
-    private fun clearShareCacheFolder() {
-        val folder = shareCacheFolder
-        val files = folder.listFiles()
-        if (folder.exists() && !files.isNullOrEmpty()) {
-            files.forEach { it.delete() }
-            folder.delete()
-        }
-    }
-
-    @Throws(IOException::class)
-    private fun copyToShareCacheFolder(file: File): File {
-        val folder = shareCacheFolder
-        if (!folder.exists()) {
-            folder.mkdirs()
-        }
-        val newFile = File(folder, file.name)
-        file.copyTo(newFile, true)
-        return newFile
-    }
 
     override fun onAttachedToEngine(@NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "share_whatsapp")
         channel.setMethodCallHandler(this)
-
-        weakReference = WeakReference(flutterPluginBinding.applicationContext)
+        context = flutterPluginBinding.applicationContext
     }
 
     override fun onDetachedFromEngine(@NonNull binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
-        weakReference.clear()
+        context = null
     }
 
     override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: Result) {
         Log.d(TAG, "method=${call.method}, argument=${call.arguments}")
 
         when (call.method) {
-            "installed" -> {
-                installed(call, result)
-            }
-            "share" -> {
-                clearShareCacheFolder()
-                share(call, result)
-            }
-            else -> {
-                result.notImplemented()
-            }
+            "installed" -> installed(call, result)
+            "share" -> share(call, result)
+            else -> result.notImplemented()
         }
     }
 
     private fun installed(@NonNull call: MethodCall, @NonNull result: Result) {
-        try {
-            val packageName = call.arguments as String
-            val context = weakReference.get()
-
-            if (context != null) {
-                val isInstalled: Boolean = isPackageInstalled(packageName, context.packageManager)
-                result.success(if (isInstalled) 1 else 0)
-                return
-            }
-
+        val ctx = context ?: run {
             result.error("INVALID_CONTEXT", "No application context found", null)
+            return
+        }
+
+        val packageName = call.arguments as? String
+        if (packageName.isNull_or_empty()) {
+            result.error("INVALID_ARGUMENT", "Package name cannot be null or empty", null)
+            return
+        }
+
+        try {
+            val isInstalled = isPackageInstalled(packageName, ctx.packageManager)
+            result.success(if (isInstalled) 1 else 0)
         } catch (e: Exception) {
-            result.error("ERROR_INSTALLED", e.message, e)
+            result.error("ERROR_INSTALLED", e.message, null)
         }
     }
 
@@ -122,60 +81,116 @@ class ShareWhatsappPlugin : FlutterPlugin, MethodCallHandler {
         }
     }
 
+    private fun clearShareCacheFolder() {
+        val folder = shareCacheFolder ?: return
+        if (folder.exists()) {
+            folder.listFiles()?.forEach { file ->
+                // Hapus file cache yang umurnya lebih dari 1 jam agar tidak mengganggu proses share berjalan
+                if (System.currentTimeMillis() - file.lastModified() > 3600_000) {
+                    file.delete()
+                }
+            }
+        }
+    }
+
+    @Throws(IOException::class)
+    private fun copyToShareCacheFolder(file: File): File {
+        val folder = shareCacheFolder ?: throw IOException("Cache folder unavailable")
+        if (!folder.exists()) {
+            folder.mkdirs()
+        }
+        // Gunakan timestamp agar nama file unik jika dikirim berulang
+        val newFile = File(folder, "${System.currentTimeMillis()}_${file.name}")
+        file.copyTo(newFile, true)
+        return newFile
+    }
+
     private fun share(@NonNull call: MethodCall, @NonNull result: Result) {
+        val ctx = context ?: run {
+            result.error("INVALID_CONTEXT", "No application context found", null)
+            return
+        }
+
         try {
-            val packageName = call.argument<String>("packageName")
-            val phone = call.argument<String?>("phone")
+            clearShareCacheFolder()
+
+            val packageName = call.argument<String>("packageName") ?: "com.whatsapp"
+            val rawPhone = call.argument<String?>("phone")
             val text = call.argument<String?>("text")
             val contentType = call.argument<String?>("contentType")
-            val file = call.argument<String?>("file")
-            val context = weakReference.get()
+            val filePath = call.argument<String?>("file")
 
-            if (context != null) {
-                val intent = Intent().apply {
-                    action = Intent.ACTION_SEND
+            // Bersihkan nomor telepon (hanya sisipkan angka saja)
+            val phone = rawPhone?.replace(Regex("[^0-9]"), "")
 
+            // 1. Kirim File (Gambar, Video, PDF, dll.)
+            if (!filePath.isNullOrEmpty()) {
+                val fileToShare = File(filePath)
+                if (!fileToShare.exists()) {
+                    result.error("FILE_NOT_FOUND", "File does not exist: $filePath", null)
+                    return
+                }
+
+                val cachedFile = copyToShareCacheFolder(fileToShare)
+                val fileUri: Uri = FileProvider.getUriForFile(ctx, providerAuthority, cachedFile)
+
+                val intent = Intent(Intent.ACTION_SEND).apply {
                     setPackage(packageName)
-                    if (phone != null) {
-                        putExtra("jid", "$phone@s.whatsapp.net")
-                    }
-                    if (text != null) {
+                    type = contentType ?: "*/*"
+                    putExtra(Intent.EXTRA_STREAM, fileUri)
+
+                    if (!text.isNullOrEmpty()) {
                         putExtra(Intent.EXTRA_TEXT, text)
                     }
 
-                    type = "*/*"
-                    if (file != null) {
-                        type = contentType ?: "*/*"
-
-                        var uriFile = File(file)
-                        if (fileIsInShareCache(uriFile)) {
-                            // If file is saved in '.../caches/share_whatsapp' it will be erased by 'clearShareCacheFolder()'
-                            throw IOException("Shared file can not be located in '${shareCacheFolder.canonicalPath}'")
-                        }
-                        uriFile = copyToShareCacheFolder(uriFile)
-                        Log.d(TAG, "Cache file path : ${uriFile.canonicalPath}")
-
-                        val fileUri =
-                            FileProvider.getUriForFile(context, providerAuthority, uriFile)
-                        putExtra(Intent.EXTRA_STREAM, fileUri)
-                    } else if (text != null) {
-                        type = "text/plain"
+                    if (!phone.isNullOrEmpty()) {
+                        putExtra("jid", "$phone@s.whatsapp.net")
                     }
+
+                    // PERBAIKAN UTAMA: Flag permission wajib ditaruh langsung di Intent utama
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
 
-                context.startActivity(Intent.createChooser(intent, null).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    if (file != null) addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                })
+                // Berikan izin URI secara langsung ke package WhatsApp target
+                ctx.grantUriPermission(packageName, fileUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
+                ctx.startActivity(intent)
                 result.success(1)
                 return
             }
 
-            result.error("INVALID_CONTEXT", "No application context found", null)
+            // 2. Kirim Teks Langsung ke Nomor Tertentu (Deep Linking resmi WhatsApp)
+            if (!phone.isNullOrEmpty()) {
+                val encodedText = Uri.encode(text ?: "")
+                val uri = Uri.parse("https://api.whatsapp.com/send?phone=$phone&text=$encodedText")
+                val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                    setPackage(packageName)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(intent)
+                result.success(1)
+                return
+            }
+
+            // 3. Kirim Teks Biasa (Pilih Kontak Manual di WhatsApp)
+            if (!text.isNullOrEmpty()) {
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    setPackage(packageName)
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, text)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(intent)
+                result.success(1)
+                return
+            }
+
+            result.error("INVALID_ARGUMENTS", "Either file, text, or phone must be provided", null)
+
         } catch (e: Exception) {
-            result.error("ERROR_SHARE", e.message, e)
+            Log.e(TAG, "Error while sharing to WhatsApp", e)
+            result.error("ERROR_SHARE", e.message, null)
         }
     }
 }
